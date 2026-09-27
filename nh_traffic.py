@@ -16,6 +16,7 @@ page. It works today, but they could rename or lock it without warning.
 
 import json
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import requests
@@ -23,6 +24,8 @@ import streamlit as st
 
 BASE = "https://nationalhighways.co.uk/trafficsearchapi"
 HEADERS = {"User-Agent": "Mozilla/5.0 (personal traffic dashboard)"}
+
+UK = ZoneInfo("Europe/London")  # handles the BST/GMT switch automatically
 
 DIRECTIONS = {
     "N": "Northbound", "S": "Southbound", "E": "Eastbound",
@@ -87,8 +90,8 @@ def apply_filters(df, regions, roads, directions, types, max_age_hours):
 
 # ------------------------------------------------------------------ UI ----
 
-st.set_page_config(page_title="NH live traffic", page_icon=":material/traffic:", layout="wide")
-st.title("National Highways - live delays")
+st.set_page_config(page_title="NH live traffic", layout="wide")
+st.title("National Highways - live incidents")
 
 with st.sidebar:
     st.header("Filters")
@@ -137,7 +140,7 @@ def live_panel(regions, roads, directions, types, max_age, minutes):
     new_ids = current - seen if seen is not None else set()
     st.session_state["seen_ids"] = current
 
-    now = datetime.now().strftime("%H:%M:%S")
+    now = datetime.now(UK).strftime("%H:%M:%S")  # server runs on UTC, so be explicit
     c1, c2, c3 = st.columns(3)
     c1.metric("Matching events", len(view))
     c2.metric("New since last check", len(new_ids))
