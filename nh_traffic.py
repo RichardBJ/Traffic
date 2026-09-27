@@ -87,8 +87,8 @@ def apply_filters(df, regions, roads, directions, types, max_age_hours):
 
 # ------------------------------------------------------------------ UI ----
 
-st.set_page_config(page_title="NH live traffic", layout="wide")
-st.title("National Highways - live incidents")
+st.set_page_config(page_title="NH live traffic", page_icon=":material/traffic:", layout="wide")
+st.title("National Highways - live delays")
 
 with st.sidebar:
     st.header("Filters")
