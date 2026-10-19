@@ -53,30 +53,48 @@ def get_regions():
 
 @st.cache_data(ttl=60, show_spinner=False)
 def get_events():
-    """Fetch every current event in one go (there are usually only dozens)."""
-    payload = _get("events", {"page": 1, "limit": 1000})
-    data = payload.get("data", [])
-    # Their own JS guards against 'data' arriving as a JSON string, so we do too
-    if isinstance(data, str):
-        data = json.loads(data)
-    df = pd.DataFrame(data)
+    """Fetch every current event, page by page (the API caps pages at 100)."""
+    rows, page, total_pages = [], 1, 1
+    while page <= total_pages and page <= 20:  # 20 = sanity cap, not a target
+        payload = _get("events", {"page": page, "limit": 100})
+        data = payload.get("data", [])
+        # Their own JS guards against 'data' arriving as a JSON string, so we do too
+        if isinstance(data, str):
+            data = json.loads(data)
+        rows.extend(data)
+        total_pages = (payload.get("pagination") or {}).get("totalPages", 1)
+        page += 1
+    df = pd.DataFrame(rows)
     if df.empty:
         return df
     df["delay_min"] = (pd.to_numeric(df["delay"], errors="coerce").fillna(0) / 60).round().astype(int)
     df["direction_name"] = df["direction"].map(DIRECTIONS).fillna(df["direction"])
     df["updatedDate"] = pd.to_datetime(df["updatedDate"], errors="coerce")
+    # "There are 4 of 4 lanes closed" means the carriageway is shut
+    lanes = df.get("lanesClosedText", pd.Series("", index=df.index)).fillna("").str.extract(r"(\d+) of (\d+)")
+    df["fully_closed"] = lanes[0].notna() & (lanes[0] == lanes[1])
+    df["endTime"] = pd.to_datetime(df.get("overallEndTime"), errors="coerce")
+    # NH lists some roadworks several times over (separate records, same
+    # details). Keep one of each as it would appear on screen.
+    show_cols = ["title", "direction", "type", "lanesClosedText", "delay"]
+    df = df.sort_values("updatedDate", ascending=False).drop_duplicates(subset=show_cols)
     return df
 
 
 def apply_filters(df, regions, roads, directions, types, max_age_hours):
     if df.empty:
         return df
-    # The feed keeps "active" events that ended weeks ago, so drop anything
-    # that hasn't been touched recently. NH timestamps are in UTC.
+    # NH timestamps are in UTC.
+    now_utc = pd.Timestamp.now(tz="UTC").tz_localize(None)
+    # Anything with a scheduled end time that has already passed is finished
+    df = df[df["endTime"].isna() | (df["endTime"] >= now_utc)]
+    # Congestion reports are the ones that get orphaned in the feed, so only
+    # those need to have been updated recently. Roadworks can sit untouched
+    # for days while still very much closing lanes.
     if max_age_hours:
-        now_utc = pd.Timestamp.now(tz="UTC").tz_localize(None)
         cutoff = now_utc - pd.Timedelta(hours=max_age_hours)
-        df = df[df["updatedDate"] >= cutoff]
+        stale = (df["type"] == "AbnormalTraffic") & (df["updatedDate"] < cutoff)
+        df = df[~stale]
     if regions:
         df = df[df["region"].isin(regions)]
     if roads:
@@ -85,12 +103,12 @@ def apply_filters(df, regions, roads, directions, types, max_age_hours):
         df = df[df["direction"].isin(directions)]
     if types:
         df = df[df["type"].isin(types)]
-    return df.sort_values(["delay_min", "updatedDate"], ascending=[False, False])
+    return df.sort_values(["fully_closed", "delay_min", "updatedDate"], ascending=[False, False, False])
 
 
 # ------------------------------------------------------------------ UI ----
 
-st.set_page_config(page_title="NH live traffic", layout="wide")
+st.set_page_config(page_title="NH live traffic", page_icon=":material/traffic:", layout="wide")
 st.title("National Highways - live incidents")
 
 with st.sidebar:
@@ -115,7 +133,7 @@ with st.sidebar:
     sel_types = st.multiselect("Event type", type_opts)
 
     max_age = st.number_input(
-        "Hide events not updated in the last N hours (0 = show all)",
+        "Hide congestion reports not updated in the last N hours (0 = show all)",
         min_value=0, max_value=720, value=2, step=1,
     )
     minutes = st.radio("Refresh every", [5, 10], index=0, horizontal=True,
@@ -153,6 +171,8 @@ def live_panel(regions, roads, directions, types, max_age, minutes):
 
     for _, ev in view.iterrows():
         tag = " [NEW]" if ev["id"] in new_ids else ""
+        if ev["fully_closed"]:
+            tag = " [CLOSED]" + tag
         delay = f" - {ev['delay_min']} min delay" if ev["delay_min"] else ""
         with st.expander(f"{ev['title']}{delay}{tag}", expanded=bool(tag)):
             st.write(f"**{ev.get('reason', '')}** | {ev['region']} | {ev['direction_name']} | {ev['type']}")
